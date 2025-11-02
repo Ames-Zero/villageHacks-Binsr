@@ -1,2 +1,4 @@
 flask>=2.0
 reportlab>=3.5
+pdfrw>=0.4
+pypdf>=3.0

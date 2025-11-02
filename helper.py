@@ -5,7 +5,9 @@ Generates PDF reports in Texas Real Estate Commission format.
 
 import os
 import html
+import json
 from typing import List, Dict, Optional, Any
+from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -13,6 +15,8 @@ from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT, TA_JUSTIFY
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether, Frame, PageTemplate, Flowable
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import black
+from pdfrw import PdfReader, PdfWriter, PdfDict
+from pypdf import PdfReader as PyPdfReader, PdfWriter as PyPdfWriter
 
 
 class TRECReportCanvas(canvas.Canvas):
@@ -500,6 +504,320 @@ def generate_trec_pdf_from_json(json_data: Dict, output_path: str, metadata: Dic
         }
     
     return generate_trec_pdf(sections, metadata, output_path)
+
+
+def fill_top_fields_from_json(json_path: str, template_path: str, output_path: str) -> str:
+    """
+    NEW FUNCTION: Fill the top fields of the TREC PDF template from JSON data.
+    
+    Args:
+        json_path: Path to the inspection.json file
+        template_path: Path to the blank TREC template PDF
+        output_path: Path where the filled PDF should be saved
+        
+    Returns:
+        str: Path to the generated PDF file
+    """
+    
+    print("="*60)
+    print("TREC Inspection Report Generator")
+    print("="*60)
+    print("\n[STEP 1] Filling top fields (client name, address, etc.)...")
+    print("-" * 60)
+    
+    try:    
+        # Read JSON data
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        inspection = data.get('inspection', {})
+        
+        # Extract top-level data
+        client_name = inspection.get('clientInfo', {}).get('name', '')
+        inspector_name = inspection.get('inspector', {}).get('name', '')
+        address_street = inspection.get('address', {}).get('street', '')
+        address_city = inspection.get('address', {}).get('city', '')
+        address_state = inspection.get('address', {}).get('state', '')
+        address_zip = inspection.get('address', {}).get('zipcode', '')
+        
+        # Date conversion
+        schedule_date = inspection.get('schedule', {}).get('date', 0)
+        if schedule_date:
+            inspection_date = datetime.fromtimestamp(schedule_date / 1000).strftime('%m/%d/%Y')
+        else:
+            inspection_date = datetime.now().strftime('%m/%d/%Y')
+        
+        # Load PDF template
+        template = PdfReader(template_path)
+        writer = PdfWriter()
+        
+        # Dictionary to map exact field names from page 1 to our data
+        field_mappings = {
+            '(Name of Client)': client_name,
+            '(Date of Inspection)': inspection_date,
+            '(Address of Inspected Property)': address_street,
+            '(Name of Inspector)': inspector_name,
+            '(TREC License)': '',
+            '(Name of Sponsor if applicable)': '',
+            '(TREC License_2)': '',
+            '(Text1)': 'Text1',
+        }
+        
+        # Fill form fields
+        fields_filled = 0
+        for page_num, page in enumerate(template.pages):
+            annots = page.get('/Annots')
+            if annots:
+                if not isinstance(annots, list):
+                    annots = [annots]
+                
+                for annot in annots:
+                    field_name_obj = annot.get('/T')
+                    if field_name_obj:
+                        if isinstance(field_name_obj, tuple):
+                            field_name = ''.join(str(x) for x in field_name_obj if x)
+                        else:
+                            field_name = str(field_name_obj)
+                        
+                        if field_name in field_mappings:
+                            value = field_mappings[field_name]
+                            if value:
+                                annot.update(PdfDict(V=value))
+                                fields_filled += 1
+            
+            writer.addpage(page)
+        
+        print(f"  Filled {fields_filled} top-level fields")
+        
+        # Save temporarily
+        temp_path = 'output_pdf_temp.pdf'
+        writer.write(temp_path)
+        
+        # Flatten
+        try:
+            reader = PyPdfReader(temp_path)
+            writer_flat = PyPdfWriter()
+            for page in reader.pages:
+                writer_flat.add_page(page)
+            with open(output_path, 'wb') as f:
+                writer_flat.write(f)
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except:
+            # If flattening fails, just rename temp file
+            if os.path.exists(temp_path):
+                os.rename(temp_path, output_path)
+        
+        print("[OK] Top fields filled successfully")
+        return output_path
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to fill top fields: {e}")
+        raise
+
+
+def merge_pdfs_custom(blank_template_pdf: str, filled_pdf: str, sections_pdf: str, output_path: str) -> str:
+    """
+    NEW FUNCTION: Custom merge combining:
+    - Page 1: From blank template (with updated fields)
+    - Pages 2-4: From filled PDF (unchanged)
+    - Pages 5+: All pages from sections PDF
+    
+    Args:
+        blank_template_pdf: Path to blank template PDF (filled with JSON data)
+        filled_pdf: Path to filled PDF (TREC_Sample_Filled.pdf or similar)
+        sections_pdf: Path to detailed sections PDF
+        output_path: Path where merged PDF should be saved
+        
+    Returns:
+        str: Path to the merged PDF file
+    """
+    
+    print("\n[STEP 3] Merging PDFs (custom pattern)...")
+    print("-" * 60)
+    
+    try:
+        merger = PyPdfWriter()
+        
+        # Page 1: From blank template (with updated fields)
+        print(f"  Adding page 1 from: {os.path.basename(blank_template_pdf)}")
+        with open(blank_template_pdf, 'rb') as f1:
+            reader1 = PyPdfReader(f1)
+            if len(reader1.pages) > 0:
+                merger.add_page(reader1.pages[0])
+            else:
+                print("  ⚠️  Warning: Blank template has no pages")
+        
+        # Pages 2-4: From filled PDF (take pages numbered 2, 3, 4 which are indices 1, 2, 3)
+        print(f"  Adding pages 2-4 from: {os.path.basename(filled_pdf)}")
+        filled_pages_count = 0
+        with open(filled_pdf, 'rb') as f2:
+            reader2 = PyPdfReader(f2)
+            # Take pages 2, 3, 4 (0-indexed as 1, 2, 3) from filled PDF
+            start_idx = 1  # Page 2 (0-indexed)
+            end_idx = min(4, len(reader2.pages))  # Up to page 4 (0-indexed, so index 3)
+            filled_pages_count = end_idx - start_idx
+            for i in range(start_idx, end_idx):
+                merger.add_page(reader2.pages[i])
+            if filled_pages_count < 3:
+                print(f"  ⚠️  Warning: Filled PDF only has {len(reader2.pages)} page(s), added pages 2-{end_idx} ({filled_pages_count} pages)")
+        
+        # Pages 5+: All pages from sections PDF
+        print(f"  Adding all pages from: {os.path.basename(sections_pdf)}")
+        with open(sections_pdf, 'rb') as f3:
+            reader3 = PyPdfReader(f3)
+            sections_page_count = len(reader3.pages)
+            for page in reader3.pages:
+                merger.add_page(page)
+        
+        # Write merged PDF
+        with open(output_path, 'wb') as fout:
+            merger.write(fout)
+        
+        # Calculate total pages
+        blank_pages = 1  # Page 1 from blank template
+        total_pages = blank_pages + filled_pages_count + sections_page_count
+        print(f"[OK] PDFs merged successfully -> {os.path.basename(output_path)} ({total_pages} pages total)")
+        print("="*60)
+        
+        return output_path
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to merge PDFs: {e}")
+        raise
+
+
+def merge_pdfs(first_pdf_path: str, second_pdf_path: str, output_path: str, first_pdf_pages: int = 2) -> str:
+    """
+    NEW FUNCTION: Merge two PDF files into one.
+    
+    Args:
+        first_pdf_path: Path to the first PDF (will appear first)
+        second_pdf_path: Path to the second PDF (will appear after first)
+        output_path: Path where merged PDF should be saved
+        first_pdf_pages: Number of pages to include from first PDF (default: 2)
+        
+    Returns:
+        str: Path to the merged PDF file
+    """
+    
+    print("\n[STEP 3] Merging PDFs...")
+    print("-" * 60)
+    
+    try:
+        merger = PyPdfWriter()
+        
+        # Add only first N pages from first PDF (top fields)
+        print(f"  Adding first {first_pdf_pages} page(s) from: {os.path.basename(first_pdf_path)}")
+        with open(first_pdf_path, 'rb') as f1:
+            reader1 = PyPdfReader(f1)
+            pages_to_add = min(first_pdf_pages, len(reader1.pages))
+            for i in range(pages_to_add):
+                merger.add_page(reader1.pages[i])
+        
+        # Add all pages from second PDF (detailed report)
+        print(f"  Adding all pages from: {os.path.basename(second_pdf_path)}")
+        with open(second_pdf_path, 'rb') as f2:
+            reader2 = PyPdfReader(f2)
+            for page in reader2.pages:
+                merger.add_page(page)
+        
+        # Write merged PDF
+        with open(output_path, 'wb') as fout:
+            merger.write(fout)
+        
+        print(f"[OK] PDFs merged successfully -> {os.path.basename(output_path)}")
+        print("="*60)
+        
+        return output_path
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to merge PDFs: {e}")
+        raise
+
+
+def generate_complete_trec_report(json_path: str, template_path: str, output_path: str, filled_pdf_path: str = None) -> str:
+    """
+    NEW FUNCTION: Generate a complete TREC report with custom page merge pattern.
+    
+    This function:
+    1. Fills top fields (client, address, inspector, date) in the blank template (page 1)
+    2. Takes pages 2-4 from the filled PDF (if provided)
+    3. Generates detailed inspection report with sections
+    4. Merges: Page 1 (from blank) + Pages 2-4 (from filled) + All sections pages
+    
+    Args:
+        json_path: Path to the inspection.json file
+        template_path: Path to the blank TREC template PDF
+        output_path: Final output path for the complete merged report
+        filled_pdf_path: Optional path to filled PDF (e.g., TREC_Sample_Filled.pdf).
+                        If provided, pages 2-4 will be taken from this file.
+                        If None, only page 1 from blank template will be used.
+        
+    Returns:
+        str: Path to the complete merged PDF file
+    """
+    
+    # Create temporary directory for intermediate files
+    temp_dir = os.path.join(os.path.dirname(output_path) or '.', 'temp')
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    try:
+        # Step 1: Fill top fields from blank template (for page 1)
+        top_fields_pdf = os.path.join(temp_dir, 'top_fields_filled.pdf')
+        fill_top_fields_from_json(json_path, template_path, top_fields_pdf)
+        
+        # Step 2: Generate detailed report
+        print("\n[STEP 2] Generating detailed inspection report...")
+        print("-" * 60)
+        
+        # Load JSON data
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # Extract inspection data and sections
+        inspection = data.get('inspection', {})
+        
+        # Get sections - they may be at top level or nested under 'inspection'
+        sections = data.get('sections', [])
+        if not sections:
+            sections = inspection.get('sections', [])
+        
+        metadata = {
+            'reportId': data.get('reportId', data.get('report_id', inspection.get('id', 'N/A'))),
+            'inspectionDate': inspection.get('schedule', {}).get('date', ''),
+            'propertyAddress': inspection.get('address', {}).get('street', ''),
+            'inspectorName': inspection.get('inspector', {}).get('name', ''),
+            'inspectorLicense': ''
+        }
+        
+        # Generate detailed PDF using sections directly
+        detailed_pdf = os.path.join(temp_dir, 'detailed_report.pdf')
+        generate_trec_pdf(sections, metadata, detailed_pdf)
+        print("[OK] Detailed report generated successfully")
+        
+        # Step 3: Custom merge - Page 1 from blank, Pages 2-4 from filled, then sections
+        if filled_pdf_path and os.path.exists(filled_pdf_path):
+            merge_pdfs_custom(top_fields_pdf, filled_pdf_path, detailed_pdf, output_path)
+        else:
+            # Fallback: Use simple merge if no filled PDF provided
+            print("\n[STEP 3] Merging PDFs (fallback - no filled PDF provided)...")
+            print("-" * 60)
+            merge_pdfs(top_fields_pdf, detailed_pdf, output_path, first_pdf_pages=1)
+        
+        print(f"\n✓ Complete TREC report generated: {output_path}\n")
+        
+        return output_path
+        
+    finally:
+        # Clean up temporary files
+        try:
+            for file in os.listdir(temp_dir):
+                os.remove(os.path.join(temp_dir, file))
+            os.rmdir(temp_dir)
+        except:
+            pass
 
 
 # Example usage

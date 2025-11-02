@@ -211,3 +211,4 @@ test_pdf_generation.py
 inspection.json
 sections.json
 generated_files/
+*.pdf
